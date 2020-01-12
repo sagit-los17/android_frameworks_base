@@ -62,6 +62,8 @@ import com.android.systemui.statusbar.policy.KeyguardMonitorImpl;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 
+import androidx.annotation.VisibleForTesting;
+
 /**
  * Manages creating, showing, hiding and resetting the keyguard within the status bar. Calls back
  * via {@link ViewMediatorCallback} to poke the wake lock and report that the keyguard is done,
@@ -105,6 +107,7 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
 
         @Override
         public void onStartingToShow() {
+            updateStates();
             updateLockIcon();
         }
 
@@ -150,6 +153,7 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
     protected boolean mLastShowing;
     protected boolean mLastOccluded;
     private boolean mLastBouncerShowing;
+    private boolean mLastBouncerInTransit;
     private boolean mLastBouncerDismissible;
     protected boolean mLastRemoteInputActive;
     private boolean mLastDozing;
@@ -161,6 +165,7 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
     private boolean mLastLockVisible;
 
     private OnDismissAction mAfterKeyguardGoneAction;
+    private Runnable mKeyguardGoneCancelAction;
     private final ArrayList<Runnable> mAfterKeyguardGoneRunnables = new ArrayList<>();
 
     // Dismiss action to be launched when we stop dozing or the keyguard is gone.
@@ -348,9 +353,19 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
         return false;
     }
 
-    private void hideBouncer(boolean destroyView) {
+    @VisibleForTesting
+    void hideBouncer(boolean destroyView) {
         if (mBouncer == null) {
             return;
+        }
+        if (mShowing) {
+            // If we were showing the bouncer and then aborting, we need to also clear out any
+            // potential actions unless we actually unlocked.
+            mAfterKeyguardGoneAction = null;
+            if (mKeyguardGoneCancelAction != null) {
+                mKeyguardGoneCancelAction.run();
+                mKeyguardGoneCancelAction = null;
+            }
         }
         mBouncer.hide(destroyView);
         cancelPendingWakeupAction();
@@ -384,6 +399,7 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
                 mBouncer.showWithDismissAction(r, cancelAction);
             } else {
                 mAfterKeyguardGoneAction = r;
+                mKeyguardGoneCancelAction = cancelAction;
                 mBouncer.show(false /* resetSecuritySelection */);
             }
         }
@@ -698,6 +714,7 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
             mAfterKeyguardGoneAction.onDismiss();
             mAfterKeyguardGoneAction = null;
         }
+        mKeyguardGoneCancelAction = null;
         for (int i = 0; i < mAfterKeyguardGoneRunnables.size(); i++) {
             mAfterKeyguardGoneRunnables.get(i).run();
         }
@@ -787,6 +804,7 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
         boolean showing = mShowing;
         boolean occluded = mOccluded;
         boolean bouncerShowing = mBouncer.isShowing();
+        boolean bouncerInTransit = mBouncer.inTransit();
         boolean bouncerDismissible = !mBouncer.isFullscreenBouncer();
         boolean remoteInputActive = mRemoteInputActive;
 
@@ -815,14 +833,18 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
         if ((showing && !occluded) != (mLastShowing && !mLastOccluded) || mFirstUpdate) {
             updateMonitor.onKeyguardVisibilityChanged(showing && !occluded);
         }
-        if (bouncerShowing != mLastBouncerShowing || mFirstUpdate) {
-            updateMonitor.sendKeyguardBouncerChanged(bouncerShowing);
+
+        boolean bouncerVisible = bouncerShowing || bouncerInTransit;
+        boolean lastBouncerVisible = mLastBouncerShowing || mLastBouncerInTransit;
+        if (bouncerVisible != lastBouncerVisible || mFirstUpdate) {
+            updateMonitor.sendKeyguardBouncerChanged(bouncerVisible);
         }
 
         mFirstUpdate = false;
         mLastShowing = showing;
         mLastOccluded = occluded;
         mLastBouncerShowing = bouncerShowing;
+        mLastBouncerInTransit = bouncerInTransit;
         mLastBouncerDismissible = bouncerDismissible;
         mLastRemoteInputActive = remoteInputActive;
         mLastDozing = mDozing;
